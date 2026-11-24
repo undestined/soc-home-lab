@@ -146,5 +146,3 @@ To evaluate how LLM-assisted triage performs against real alert data, a Python p
 ---
 
 **Stack:** VMware Workstation, Wazuh 4.14, Sysmon, Atomic Red Team, Python, VirusTotal API, AbuseIPDB API, Google Gemini API
-
-**Contact:** Prasanna Venkatesh S | [linkedin.com/in/undestined](https://linkedin.com/in/undestined) | [tryhackme.com/p/undestined](https://tryhackme.com/p/undestined)
