@@ -1,158 +1,147 @@
 # SOC Home Lab: SIEM Alert Investigation with AI-Assisted Triage
 
-I built this lab to get actual hands-on SOC experience before applying for analyst roles, instead of just putting "familiar with SIEM tools" on a resume and hoping nobody asks a follow-up question. It's a small, self-contained Security Operations Center running on three VMs: a Wazuh SIEM, a Windows endpoint I deliberately attacked using Atomic Red Team, and a Python pipeline that pulls real alerts and uses an LLM to draft triage summaries for me to review.
+> *Note: this writeup was drafted by hand and polished/edited with AI assistance.*
 
-I didn't follow a tutorial and take screenshots along the way. Almost everything below broke at least once before it worked, and I've written up the breaking just as much as the building, because that's closer to what the job actually looks like day to day.
+A self-built Security Operations Center environment used to practice detection engineering, alert triage, and MITRE ATT&CK-based attack simulation, extended with a Python pipeline that integrates threat-intelligence enrichment and LLM-assisted triage.
+
+The lab consists of three VMs on an isolated internal network: a Wazuh SIEM, a Windows endpoint instrumented with Sysmon, and a Kali Linux attacker host used to run MITRE ATT&CK technique simulations via Atomic Red Team. A Python script pulls alerts directly from the Wazuh Indexer API, enriches indicators through VirusTotal and AbuseIPDB, and uses an LLM to draft triage summaries for analyst review.
 
 ![Lab architecture](diagrams/architecture_diagram.png)
 
-## What's actually in this lab
+## Environment
 
-- **Kali Linux**: attacker VM, used for brute-force testing (Hydra) and for hosting Atomic Red Team's test tooling.
-- **Windows 10 VM**: the victim endpoint. Instrumented with Sysmon (SwiftOnSecurity config) and enrolled as a Wazuh agent.
-- **Wazuh Manager + Indexer**: single-node SIEM, OVA deployment, running the default MITRE ATT&CK-mapped detection rules.
-- **A Python triage script**: pulls recent alerts straight from the Wazuh Indexer's API, enriches file hashes and IPs through VirusTotal and AbuseIPDB, then asks Google's Gemini to draft a plain-English summary of what each alert means. I review every draft myself and either agree with it, correct it, or override it entirely.
+| Component | Role |
+|---|---|
+| Kali Linux | Attacker VM, used for brute-force testing (Hydra) and running Atomic Red Team |
+| Windows 10 VM | Victim endpoint, instrumented with Sysmon (SwiftOnSecurity config), enrolled as a Wazuh agent |
+| Wazuh Manager + Indexer | Single-node SIEM (OVA deployment) with default MITRE ATT&CK-mapped detection rules |
+| Python triage pipeline | Pulls alerts from the Wazuh Indexer API, enriches via VirusTotal/AbuseIPDB, drafts summaries via Google Gemini |
 
-All three VMs sit on an isolated internal network with no route to the internet by default. That turned out to matter more than I expected, more on that further down.
+All VMs run on an isolated internal network with no outbound internet access by default.
 
-## What I actually tested
+## Attack Simulation Results
 
-I ran 11 separate techniques through Atomic Red Team, spanning six MITRE ATT&CK tactics: Credential Access, Discovery, Defense Evasion, Execution, Persistence, and Privilege Escalation. I wanted breadth here instead of just repeating the same PowerShell technique five times in a row, since a real environment doesn't attack you one way.
+11 MITRE ATT&CK techniques were executed via Atomic Red Team, spanning six tactics: Credential Access, Discovery, Defense Evasion, Execution, Persistence, and Privilege Escalation. The goal was breadth across the kill chain rather than repeated testing of a single technique.
 
 <table border="1" cellpadding="8" cellspacing="0">
 <thead>
 <tr>
 <th>Technique</th>
 <th>Tactic</th>
-<th>What Wazuh Caught</th>
+<th>Detection Evidence</th>
 <th>Confidence</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>T1003.002 – Credential Dumping (SAM hive)</td>
+<td>T1003.002 &ndash; Credential Dumping (SAM hive)</td>
 <td>Credential Access</td>
-<td>PowerShell copying the SAM hive from VSS, and reg.exe dumping it directly. Two separate rules fired, both high severity.</td>
+<td>PowerShell copying the SAM hive from VSS, and reg.exe dumping it directly. Two independent rules fired, both high severity.</td>
 <td>High</td>
 </tr>
 <tr>
-<td>T1016 – Network Config Discovery</td>
+<td>T1016 &ndash; Network Config Discovery</td>
 <td>Discovery</td>
 <td>Generic "system information discovery" rule, moderate severity.</td>
 <td>Moderate</td>
 </tr>
 <tr>
-<td>T1036.003 – Masquerading</td>
+<td>T1036.003 &ndash; Masquerading</td>
 <td>Defense Evasion</td>
-<td>Sysmon flagged processes renamed to look like <code>lsm.exe</code>, <code>svchost.exe</code>, and <code>lsass</code>. Caught by its own naming heuristics.</td>
+<td>Sysmon flagged processes renamed to impersonate <code>lsm.exe</code>, <code>svchost.exe</code>, and <code>lsass</code>, caught by its built-in naming heuristics.</td>
 <td>High</td>
 </tr>
 <tr>
-<td>T1047 – Windows Management Instrumentation</td>
+<td>T1047 &ndash; Windows Management Instrumentation</td>
 <td>Execution</td>
-<td>Nothing specific fired. Only generic low-severity noise.</td>
-<td><strong>Gap: no rule exists for this</strong></td>
+<td>No technique-specific rule fired. Only generic, low-severity noise.</td>
+<td><strong>Gap: no rule exists for this in the default ruleset</strong></td>
 </tr>
 <tr>
-<td>T1053.005 – Scheduled Task</td>
+<td>T1053.005 &ndash; Scheduled Task</td>
 <td>Execution / Persistence / PrivEsc</td>
-<td>Strong supporting signals (base64 in registry, script dropped in AppData) but no dedicated "task created" rule.</td>
+<td>Strong supporting signals (base64 in registry, script dropped in AppData), but no dedicated "task created" rule.</td>
 <td>Partial</td>
 </tr>
 <tr>
-<td>T1059.001 – PowerShell</td>
+<td>T1059.001 &ndash; PowerShell</td>
 <td>Execution</td>
-<td>Caught a base64-encoded command spawning another PowerShell process. Exactly the obfuscation pattern this rule exists for.</td>
+<td>Base64-encoded command spawning a secondary PowerShell process, matching the obfuscation pattern the rule targets.</td>
 <td>High</td>
 </tr>
 <tr>
-<td>T1059.003 – Command Shell</td>
+<td>T1059.003 &ndash; Command Shell</td>
 <td>Execution</td>
-<td>Only generic chaining alerts. Nothing that stood out from routine admin scripting.</td>
+<td>Only generic process-chaining alerts, indistinguishable from routine admin scripting.</td>
 <td>Low / generic only</td>
 </tr>
 <tr>
-<td>T1136.001 – Create Local Account</td>
+<td>T1136.001 &ndash; Create Local Account</td>
 <td>Persistence</td>
-<td><code>net1.exe</code> user-creation command, caught directly.</td>
+<td><code>net1.exe</code> user-creation command detected directly.</td>
 <td>High</td>
 </tr>
 <tr>
-<td>T1543.003 – Create/Modify Windows Service</td>
+<td>T1543.003 &ndash; Create/Modify Windows Service</td>
 <td>Persistence / PrivEsc</td>
-<td>New service creation plus registry evidence. Multiple corroborating signals.</td>
+<td>New service creation plus registry evidence, with multiple corroborating signals.</td>
 <td>High</td>
 </tr>
 <tr>
-<td>T1547.001 – Startup Folder Persistence</td>
+<td>T1547.001 &ndash; Startup Folder Persistence</td>
 <td>Persistence / PrivEsc</td>
-<td>PowerShell copying an executable into the Windows startup folder. Very specific, high severity.</td>
+<td>PowerShell copying an executable into the Windows startup folder, a specific, high-severity match.</td>
 <td>High</td>
 </tr>
 <tr>
-<td>T1548.002 – UAC Bypass (FodHelper)</td>
+<td>T1548.002 &ndash; UAC Bypass (FodHelper)</td>
 <td>PrivEsc / Defense Evasion</td>
-<td>Five separate rules correlated into one story: the FodHelper invocation, the specific registry key it uses, and the auto-elevation behavior itself.</td>
-<td><strong>Very high, genuinely the best result in the lab</strong></td>
+<td>Five correlated rules: the FodHelper invocation, the specific registry key associated with the bypass, and the auto-elevation behavior itself.</td>
+<td><strong>Very high &ndash; full attack-chain correlation</strong></td>
 </tr>
 </tbody>
 </table>
 
 <br>
 
-9 out of 11 produced a real, specific detection. 1 was a clean miss (no WMI-specific rule exists in Wazuh's default ruleset), and 1 only had partial supporting evidence. I'd rather show that honestly than pretend everything was a perfect catch. Knowing how to tell a real detection from a weak one is a more useful skill to demonstrate than a perfect scorecard.
+**Summary:** 9 of 11 techniques produced a specific, technique-level detection. 1 technique (T1047) revealed a genuine gap in the default ruleset. 1 (T1053.005) had only partial supporting evidence.
 
-## The false positive I wasn't expecting to find
+## Key Finding: A Systemic False Positive
 
-One thing stood out across all 11 test runs. A single Wazuh rule (92213, "executable dropped in a folder commonly used by malware," severity 15, the highest in the ruleset) fired as the **top alert in every single run**, no matter what technique I was actually testing.
+Across all 11 test runs, Wazuh rule 92213 ("executable dropped in a folder commonly used by malware," severity 15, the highest in the ruleset) fired as the top-severity alert every single time, regardless of which technique was being tested.
 
-I dug into it instead of just ignoring it. Turns out Atomic Red Team's PowerShell-based test runner creates a small housekeeping file (`__PSScriptPolicyTest_*.ps1`) in the Temp folder every time it runs anything. Completely harmless, just PowerShell checking its own script execution policy. But the rule is written to flag any file landing in that folder as malware-like, based purely on the path, with no regard for what the file actually is.
+Root cause analysis traced this to Atomic Red Team's PowerShell-based execution harness, which creates a housekeeping file (`__PSScriptPolicyTest_*.ps1`) in the Temp directory on every run as part of PowerShell's own script-policy validation. The rule flags any file in that path as malware-like based on location alone, with no file-content or hash verification, making it a predictable false positive rather than a genuine detection.
 
-So technically Wazuh "detected" something in all 11 runs, but the loudest, highest-severity alert each time was actually noise. In a real SOC, a rule like this trains analysts to tune it out, which is exactly how real attacks end up hiding in plain sight. If I were running this ruleset for real, I'd either add an exception for PowerShell's own known policy-test file pattern, or rewrite the rule to check file content or hash instead of just the folder path.
+**Recommended fix:** add an exception for PowerShell's known policy-test file pattern, or convert the rule from path-based to content/hash-based detection logic.
 
-## The AI-assisted triage layer
+## AI-Assisted Triage Pipeline
 
-SOC teams are increasingly leaning on LLMs to help with alert volume, so I built a small pipeline to actually try it rather than just read about it:
+To evaluate how LLM-assisted triage performs against real alert data, a Python pipeline was built with the following flow:
 
-1. Pull the most recent alerts directly from Wazuh's Indexer API.
-2. For any alert containing a file hash or IP, check it against VirusTotal and AbuseIPDB.
-3. Hand the enriched alert to Gemini and ask for a plain-English summary, a suggested triage category, and a likely MITRE mapping.
-4. Review every single draft myself and either agree, disagree, or add context before accepting it.
+1. Pull recent alerts from the Wazuh Indexer API.
+2. Enrich any file hash or IP found in an alert via VirusTotal and AbuseIPDB.
+3. Submit the enriched alert to Google Gemini for a draft summary, a suggested triage category, and a likely MITRE mapping.
+4. Review and finalize every draft manually before acceptance.
 
-What genuinely surprised me: the AI's drafts were reasonable almost every time. It correctly called two DNS timeout alerts benign, and correctly flagged ambiguous registry deletions as needing escalation. But I also caught it giving **inconsistent labels on functionally identical alerts**, the same rule, same host, seconds apart, labeled "likely false positive" once and "needs escalation" the next time. That's not a small detail to brush past. It's the exact reason an AI draft can't be the final word, and I'd rather document it than bury it. "The AI helped" is a less useful story than "the AI helped, and here's specifically where I had to catch it out."
+**Results:** the model's drafts were accurate on straightforward cases (e.g., correctly identifying benign DNS timeout alerts). However, it produced **inconsistent triage labels on functionally identical alerts** (same rule, same host, seconds apart), labeling one instance "likely false positive" and a near-identical instance "needs escalation." This demonstrates why LLM-drafted triage requires analyst verification rather than autonomous action, and is documented here as a limitation rather than omitted.
 
-## Problems I ran into (and actually had to solve)
+## Technical Challenges and Resolutions
 
-I'm including this section because I think it's more useful to a recruiter than a list of green checkmarks. Anyone can follow a tutorial start to finish. These are the parts where something broke and I had to actually work out why.
+| Issue | Root Cause | Resolution |
+|---|---|---|
+| Wazuh VM hung indefinitely on boot splash screen | OVA imported with an outdated virtual hardware compatibility level (6.5-7.x) incompatible with the current VMware Workstation build | Removed an unused floppy device and upgraded the VM's hardware compatibility version |
+| Alerts were not appearing in the dashboard for an extended period, despite a healthy agent connection | VMware Tools time synchronization was disabled on the Wazuh VM; the system clock had drifted after several power cycles, so alerts were timestamped outside the dashboard's active time-range filter | Enabled host time synchronization in VMware Tools across all VMs and verified clock alignment |
+| Indexer API was unreachable from outside the VM | OpenSearch was bound to <code>127.0.0.1</code> only, confirmed via <code>ss -tlnp</code> | Set <code>network.host: 0.0.0.0</code> in the OpenSearch configuration and restarted the service |
+| Free-tier LLM API calls failed intermittently (404s, then 503s/timeouts) | Incorrect model name and authentication method initially; underlying free-tier model experienced genuine server-side overload under normal use | Corrected the model name/auth header per the provider's own working example, then implemented retry logic with exponential backoff |
+| Windows audit-policy configuration tool (<code>secpol.msc</code>) was unavailable | Tool is excluded from Windows 10/11 Home edition | Used the <code>auditpol</code> command-line equivalent, which provides identical functionality across all editions |
+| Several Atomic Red Team tests failed with missing-module errors | Tests referenced external tools (e.g., BloodHound/SharpHound) not bundled by default | Identified the dependency and substituted self-contained test cases where appropriate |
 
-**The Wazuh VM just sat on the splash screen.**
-Powered it on, got the Wazuh logo, and nothing happened for way longer than it should have. Turned out the OVA had imported with an extremely old virtual hardware compatibility level (6.5-7.x) that didn't get along with my much newer VMware Workstation build. Removing a leftover floppy drive and upgrading the VM's hardware version fixed it. First I'd actually suspected a UEFI/BIOS firmware mismatch, which turned out to be a dead end. Lesson: when something hangs with zero error message, check what you're actually running before chasing the obvious theory.
+## Planned Improvements
 
-**Alerts just weren't showing up. For hours.**
-This was the most frustrating one. The agent was connected, the manager's services were all healthy, I'd rechecked the Sysmon config a dozen times, and still nothing in the dashboard. Turned out VMware Tools' time-sync setting was off on the Wazuh VM, so after a few power cycles its clock had drifted out of sync with the Windows VM. Every alert was technically arriving, just stamped with a timestamp the dashboard's "last 10 minutes" filter didn't think was recent. Nothing in any log said the clock was wrong. I only caught it because the agent's "last keep-alive" timestamp looked like it was sitting in the future. Now I check VM clock sync first, not last, whenever something seems to vanish without a trace.
-
-**The indexer flatly refused connections from outside the VM.**
-My script could talk to Wazuh from inside the manager VM itself but not from my own laptop. Running `ss -tlnp` showed the indexer was only bound to `127.0.0.1`. It was never going to accept outside connections no matter what firewall rules I opened. Had to edit OpenSearch's config directly (`network.host: 0.0.0.0`) and restart the service.
-
-**A free-tier AI API is not the same thing as a stable one.**
-Once I ran out of budget for paid Claude API credits, I switched to Google's free-tier Gemini. It works, but getting there took its own round of debugging: wrong auth method (it wanted a header, not a query parameter), a model name that returned a flat 404, and then once that was sorted, actual server overload (503s) and timeouts under completely normal use. I ended up writing retry logic with increasing backoff instead of assuming my own code was broken every time a request failed. Good reminder that "free" and "production-stable" aren't the same thing.
-
-**Windows Home edition quietly doesn't have half the tools SOC guides assume you have.**
-`secpol.msc`, used to configure audit policies for login and logoff events, simply doesn't exist on Windows Home. Rather than rebuild the whole VM, I found the command-line equivalent (`auditpol`) does exactly the same job and works on every edition.
-
-**Some Atomic Red Team tests need external tools that aren't included by default.**
-A couple of tests reference tools like BloodHound and SharpHound, which aren't bundled in for licensing and size reasons, and the error message doesn't make that obvious. Lesson: when a test fails with a missing-module error, check whether it depends on an external payload before assuming the environment itself is broken.
-
-## What I'd do differently with more time
-
-- Add detection coverage for WMI execution (T1047) specifically, since the default ruleset has a real gap there.
-- Fix the AppData/Temp folder false-positive rule instead of just documenting it.
-- Feed the AI triage layer richer raw event data. Right now it's missing Wazuh's `syscheck`-specific fields for file-integrity alerts, which capped how useful its drafts could be for those.
-- Extend the lab into basic cloud logging (forwarding AWS CloudTrail into the same Wazuh instance) to practice a hybrid on-prem and cloud detection setup.
-
-## Why this project, specifically
-
-Everything in this write-up is something I can talk through in detail, including the parts that went wrong, because I was the one who had to work out why they went wrong in the first place.
+- Add detection coverage for WMI-based execution (T1047), identified as a gap in the current ruleset.
+- Remediate the AppData/Temp false-positive rule (92213) rather than only documenting it.
+- Extend the enrichment pipeline to surface Wazuh's `syscheck`-specific fields for file-integrity alerts, which were not available to the AI triage layer in this iteration.
+- Extend the lab to ingest cloud logs (AWS CloudTrail) into the same Wazuh instance to practice hybrid on-premises and cloud detection.
 
 ---
 
